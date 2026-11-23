@@ -3,15 +3,18 @@ package com.music.bitchord.data.canvas
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
+import android.net.Uri
 import android.webkit.CookieManager
-import android.webkit.JavascriptInterface
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
 import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.music.bitchord.data.DebugLog as Log
 import com.music.bitchord.data.Http
 import com.music.bitchord.data.settings.AppSettings
-import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -28,6 +31,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.Base64
+import kotlin.coroutines.resume
 
 /**
  * The bearer token behind Spotify's own web player, minted from the
@@ -42,7 +46,7 @@ import java.util.Base64
 internal object SpotifyToken {
 
     private const val TAG = "SpotifyToken"
-    private const val BRIDGE_NAME = "BitChordSpotifyTokenBridge"
+    private const val PLAYER_ORIGIN = "https://open.spotify.com"
     private const val HARVEST_TIMEOUT_MS = 20_000L
     private const val DEFAULT_TOKEN_LIFETIME_MS = 3_600_000L
 
@@ -132,8 +136,6 @@ internal object SpotifyToken {
      */
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun harvestViaWebView(context: Context, cookie: String): HarvestedToken? {
-        val deferred = CompletableDeferred<HarvestedToken?>()
-
         val cookieManager = CookieManager.getInstance().apply {
             setAcceptCookie(true)
             setCookie("https://open.spotify.com/", "sp_dc=$cookie; Domain=.spotify.com; Path=/; Secure")
@@ -153,69 +155,93 @@ internal object SpotifyToken {
                 settings.domStorageEnabled = true
                 settings.userAgentString = CANVAS_UA
                 cookieManager.setAcceptThirdPartyCookies(this, true)
-                addJavascriptInterface(TokenBridge(deferred), BRIDGE_NAME)
+                settings.allowFileAccess = false
+                settings.allowContentAccess = false
+                settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
 
                 webViewClient = object : WebViewClient() {
+                    override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean =
+                        request.isForMainFrame && !isPlayerOrigin(request.url)
+
                     override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
-                        super.onPageStarted(view, url, favicon)
-                        view.evaluateJavascript(HOOK_SCRIPT, null)
+                        if (url?.let { isPlayerOrigin(Uri.parse(it)) } == true) {
+                            view.evaluateJavascript(HOOK_SCRIPT, null)
+                        } else {
+                            view.stopLoading()
+                        }
                     }
 
                     override fun onPageFinished(view: WebView, url: String?) {
-                        super.onPageFinished(view, url)
-                        // Re-assert in case the player navigated client-side
-                        // after the onPageStarted injection ran.
-                        view.evaluateJavascript(HOOK_SCRIPT, null)
+                        if (url?.let { isPlayerOrigin(Uri.parse(it)) } == true) {
+                            view.evaluateJavascript(HOOK_SCRIPT, null)
+                        }
                     }
                 }
-                loadUrl("https://open.spotify.com/")
+                loadUrl("$PLAYER_ORIGIN/")
             }
-
-            withTimeoutOrNull(HARVEST_TIMEOUT_MS) { deferred.await() }
+            withTimeoutOrNull(HARVEST_TIMEOUT_MS) {
+                readPlayerToken(checkNotNull(webView))
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
-            Log.w(TAG, "token harvest threw: ${e.message}")
+            Log.w(TAG, "token harvest threw: ${e.javaClass.simpleName}")
             null
         } finally {
-            runCatching {
-                webView?.removeJavascriptInterface(BRIDGE_NAME)
-                webView?.stopLoading()
-                webView?.destroy()
-            }
+            webView?.stopLoading()
+            webView?.destroy()
         }
     }
 
-    /** Receives raw `/api/token` response bodies from the hooked page. */
-    private class TokenBridge(private val deferred: CompletableDeferred<HarvestedToken?>) {
-        @JavascriptInterface
-        fun onTokenPayload(payload: String?) {
-            if (payload.isNullOrBlank() || deferred.isCompleted) return
-            runCatching {
+    private fun isPlayerOrigin(uri: Uri): Boolean =
+        uri.scheme == "https" && uri.host == "open.spotify.com" && (uri.port == -1 || uri.port == 443)
+
+    private suspend fun readPlayerToken(view: WebView): HarvestedToken {
+        while (true) {
+            val result = suspendCancellableCoroutine<String?> { continuation ->
+                view.evaluateJavascript(READ_TOKEN_SCRIPT) { result ->
+                    if (continuation.isActive) continuation.resume(result)
+                }
+            }
+            val token = runCatching {
+                val payload = result?.let { json.parseToJsonElement(it).jsonPrimitive.contentOrNull }
+                    ?: return@runCatching null
                 val root = json.parseToJsonElement(payload).jsonObject
-                val token = root["accessToken"]?.jsonPrimitive?.contentOrNull
-                val anonymous = root["isAnonymous"]?.jsonPrimitive?.contentOrNull
-                    ?.toBooleanStrictOrNull() ?: false
-                // The player also mints an anonymous token before the cookie
-                // takes effect; that one can't read canvases, so keep waiting
-                // for the logged-in one.
-                if (token.isNullOrBlank() || anonymous) return
+                val accessToken = root["accessToken"]?.jsonPrimitive?.contentOrNull
+                val anonymous = root["isAnonymous"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull()
+                if (accessToken.isNullOrBlank() || anonymous == true) return@runCatching null
                 val expiresAt = root["accessTokenExpirationTimestampMs"]?.jsonPrimitive?.contentOrNull
                     ?.toLongOrNull()?.takeIf { it > System.currentTimeMillis() }
                     ?: (System.currentTimeMillis() + DEFAULT_TOKEN_LIFETIME_MS)
-                val clientId = root["clientId"]?.jsonPrimitive?.contentOrNull
-                deferred.complete(HarvestedToken(token, expiresAt, clientId))
-            }
+                HarvestedToken(accessToken, expiresAt, root["clientId"]?.jsonPrimitive?.contentOrNull)
+            }.getOrNull()
+            if (token != null) return token
+            delay(250)
         }
     }
 
+    private val READ_TOKEN_SCRIPT = """
+        (function () {
+          if (location.origin !== '$PLAYER_ORIGIN') return null;
+          return window.__bitchordTokenPayload || null;
+        })();
+    """.trimIndent()
+
     private val HOOK_SCRIPT = """
         (function () {
-          if (window.__bitchordTokenHook) return;
+          if (location.origin !== '$PLAYER_ORIGIN' || window.__bitchordTokenHook) return;
           window.__bitchordTokenHook = true;
           var report = function (body) {
-            try { $BRIDGE_NAME.onTokenPayload(body); } catch (e) {}
+            try {
+              var token = JSON.parse(body);
+              if (token.accessToken && !token.isAnonymous) window.__bitchordTokenPayload = body;
+            } catch (e) {}
           };
           var isToken = function (u) {
-            try { return String(u).indexOf('/api/token') !== -1; } catch (e) { return false; }
+            try {
+              var url = new URL(u, location.href);
+              return url.origin === '$PLAYER_ORIGIN' && url.pathname === '/api/token';
+            } catch (e) { return false; }
           };
           var origFetch = window.fetch;
           if (origFetch) {

@@ -3,6 +3,10 @@ This combined native-music build is distributed under GPL-3.0-only (LICENSE) due
 BitChord native source integration: upstream kushagrasinghx/BitChord commit acf219a7e4a7f52f026d4336d5c7ac5cf7bfafcc (GPLv3), vendored as Android library plus shared data/UI modules in bitchord/. Actual upstream Compose navigation and Media3 playback service are hosted inside iDash. Host modifications and dependency provenance are in bitchord/PROVENANCE.md. Corresponding source and rebuild archives are included in this branch; GPL text is bundled in APK assets/licenses/BitChord-GPL-3.0.txt. SF Pro fonts and SF Symbols vectors are excluded; host variant uses Inter (OFL) and Material icons (Apache-2.0).
 
 Provenance
+- iDash3 project owner and copyright holder of the original iDash code:
+  shazwannoor95-jpg (https://github.com/shazwannoor95-jpg). The generic sedan
+  artwork, procedural wallpapers and built-in launcher symbols are credited
+  to the iDash3 project maintained by shazwannoor95-jpg.
 - Application source is derived from iDash 0.1.8 (Phase 6C) as stabilised in iDash2
   (same author). Unlike earlier projects, NO MRiOS, SF Pro Display or SmartTube asset or code is included.
 - JakimCalendar.java parsing is adapted from NexaDash JakimSchedule.java (MIT,
@@ -13,11 +17,11 @@ Provenance
   illustration with no manufacturer badge or plate. Legacy Saga artwork can be
   used from a private local debug overlay where its use is authorized.
 - The launcher wallpaper picker includes procedural wallpapers (Wallpapers.java).
-  The ten Premium Themes use the original PNGs supplied by the project owner,
-  bundled under app/src/main/assets/themes/. Confirm public redistribution rights
-  for those PNGs before publishing. Icons displayed for installed third-party
+  The ten Premium Themes use the original PNGs supplied by shazwannoor95-jpg,
+  bundled under app/src/main/assets/themes/. The project owner confirmed public
+  redistribution rights for those PNGs. Icons displayed for installed third-party
   apps come from the installed apps. Their artwork, logos and trademarks belong
-  to their respective owners. iDash draws its built-in control symbols.
+  to their respective owners.
 - Typeface: Inter and Inter Display (c) The Inter Project Authors, SIL Open Font License 1.1
   (docs/licenses/Inter-OFL.txt); converted from the inter-ui 4.1.1 web fonts (latin subset) to TTF.
   SF Pro is NOT included: Apple's licence does not allow redistribution in an Android app.
@@ -43,3 +47,15 @@ Open-Meteo data attribution/license: https://open-meteo.com/en/terms (CC BY 4.0 
 The app displays the provider credit; no weather service data is bundled as live data.
 Official BitChord rail artwork is copied unchanged from kushagrasinghx/BitChord
 at acf219a7e4a7f52f026d4336d5c7ac5cf7bfafcc; its source is included under bitchord/.
+
+Native audio libraries
+- libusb 1.0.27 is used under LGPL-2.1-or-later in libbitchord_usb.so. The
+  exact source archive, CMake build definition and rebuild instructions are
+  supplied in third_party/source/ and bitchord/app/src/main/cpp/. Replace
+  the libusb source and rebuild through Gradle to relink the USB library.
+- The DST decoder by Peter Ross, adapted through DSD-Nexus, is licensed
+  LGPL-2.1-or-later. See bitchord/app/src/main/cpp/dsd/dst/NOTICE.md for
+  attribution, modifications and replacement instructions.
+- Both LGPL texts and the DST notice are bundled in APK assets/licenses/.
+  Reverse engineering to debug modifications of these LGPL components is
+  permitted.

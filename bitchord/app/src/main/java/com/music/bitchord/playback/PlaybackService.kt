@@ -8626,25 +8626,33 @@ class PlaybackService : MediaLibraryService() {
      */
     private inner class MediaLibraryCallback : MediaLibrarySession.Callback {
 
+        private fun customCommandsFor(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo,
+        ): List<SessionCommand> {
+            if (controller.uid == android.os.Process.myUid()) {
+                return listOf(
+                    favoriteCommand, boundedContextCommand, clearBoundedContextCommand,
+                    autoplayCommand, shuffleCommand, startStationCommand, revertToOriginalCommand,
+                    swapToVersionCommand, beginRadioQueueCommand, commitRadioQueueCommand,
+                    upgradeQualityCommand, swapVersionCommand, queueDragCommand,
+                )
+            }
+            if (session.isMediaNotificationController(controller) ||
+                session.isAutoCompanionController(controller) || session.isAutomotiveController(controller)
+            ) {
+                return listOf(favoriteCommand, shuffleCommand, startStationCommand, revertToOriginalCommand)
+            }
+            return emptyList()
+        }
+
         override fun onConnect(
             session: MediaSession,
             controller: MediaSession.ControllerInfo,
         ): MediaSession.ConnectionResult {
             val sessionCommands = MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS
                 .buildUpon()
-                .add(favoriteCommand)
-                .add(boundedContextCommand)
-                .add(clearBoundedContextCommand)
-                .add(autoplayCommand)
-                .add(shuffleCommand)
-                .add(startStationCommand)
-                .add(revertToOriginalCommand)
-                .add(swapToVersionCommand)
-                .add(beginRadioQueueCommand)
-                .add(commitRadioQueueCommand)
-                .add(upgradeQualityCommand)
-                .add(swapVersionCommand)
-                .add(queueDragCommand)
+                .addSessionCommands(customCommandsFor(session, controller))
                 .build()
             return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
                 .setAvailablePlayerCommands(MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS)
@@ -8669,6 +8677,9 @@ class PlaybackService : MediaLibraryService() {
             customCommand: SessionCommand,
             args: Bundle,
         ): ListenableFuture<SessionResult> {
+            if (customCommandsFor(session, controller).none { it.customAction == customCommand.customAction }) {
+                return Futures.immediateFuture(SessionResult(SessionError.ERROR_PERMISSION_DENIED))
+            }
             when (customCommand.customAction) {
                 ACTION_START_BOUNDED_CONTEXT -> startBoundedContext(args)
                 ACTION_CLEAR_BOUNDED_CONTEXT -> clearBoundedContext()
