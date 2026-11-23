@@ -1,0 +1,47 @@
+plugins { id 'com.android.application' }
+
+def privateArtwork = providers.gradleProperty('idashPrivateArtwork').map { path -> file(path) }.orNull
+def privateIconPack = privateArtwork != null &&
+        new File(privateArtwork, 'assets/icons/ios26/mapping.tsv').isFile()
+
+android {
+    namespace 'com.shazwan.idash3'
+    compileSdk 37
+    defaultConfig {
+        applicationId 'com.shazwan.idash3'
+        minSdk 26
+        targetSdk 35
+        buildConfigField 'boolean', 'IDASH_PRIVATE_ICON_PACK', 'false'
+        versionCode 49
+        versionName '0.8.2-rc5'
+        testInstrumentationRunner providers.gradleProperty('idashRunner').getOrElse('com.shazwan.idash3.SmokeChecks')
+    }
+    packaging { resources { excludes += 'META-INF/versions/9/OSGI-INF/MANIFEST.MF'; pickFirsts += ['META-INF/LICENSE.md', 'META-INF/LICENSE.txt', 'META-INF/NOTICE.md'] } }
+    defaultConfig { ndk { abiFilters(*providers.gradleProperty('idashAbi').getOrElse('armeabi-v7a,arm64-v8a,x86_64').split(',')) } }
+    buildFeatures { buildConfig true }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+    if (privateArtwork != null) {
+        sourceSets.debug.res.srcDir(new File(privateArtwork, 'res'))
+        if (privateIconPack) sourceSets.debug.assets.srcDir(new File(privateArtwork, 'assets'))
+    }
+    buildTypes {
+        debug {
+            buildConfigField 'boolean', 'IDASH_PRIVATE_ICON_PACK', privateIconPack.toString()
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), '../bitchord/app/proguard-rules.pro', 'headunit-proguard.pro'
+        }
+        release { minifyEnabled true; shrinkResources true; proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), '../bitchord/app/proguard-rules.pro', 'headunit-proguard.pro' }
+    }
+    testOptions { unitTests.returnDefaultValues = true }
+    lint { abortOnError true; warningsAsErrors false }
+}
+dependencies { androidTestImplementation "androidx.media3:media3-session:1.11.0"; androidTestImplementation "androidx.media3:media3-common:1.11.0"; implementation project(':bitchord'); implementation 'androidx.appcompat:appcompat:1.7.0'; implementation 'androidx.activity:activity:1.9.3'; implementation 'org.osmdroid:osmdroid-android:6.1.20'; testImplementation 'junit:junit:4.13.2' }
+
+dependencies {
+    constraints {
+        implementation('com.google.guava:guava:33.7.2-android') {
+            because 'Use an Android Guava version with the GHSA-xxph-c9ww-hj94 fix'
+        }
+    }
+}

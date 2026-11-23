@@ -1,0 +1,45 @@
+This combined native-music build is distributed under GPL-3.0-only (LICENSE) due to adapted BitChord code. Original iDash components retain their MIT grant in LICENSE-MIT; existing artwork/font notices and rights below remain unchanged.
+
+BitChord native source integration: upstream kushagrasinghx/BitChord commit acf219a7e4a7f52f026d4336d5c7ac5cf7bfafcc (GPLv3), vendored as Android library plus shared data/UI modules in bitchord/. Actual upstream Compose navigation and Media3 playback service are hosted inside iDash. Host modifications and dependency provenance are in bitchord/PROVENANCE.md. Corresponding source and rebuild archives are included in this branch; GPL text is bundled in APK assets/licenses/BitChord-GPL-3.0.txt. SF Pro fonts and SF Symbols vectors are excluded; host variant uses Inter (OFL) and Material icons (Apache-2.0).
+
+Provenance
+- Application source is derived from iDash 0.1.8 (Phase 6C) as stabilised in iDash2
+  (same author). Unlike earlier projects, NO MRiOS, SF Pro Display or SmartTube asset or code is included.
+- JakimCalendar.java parsing is adapted from NexaDash JakimSchedule.java (MIT,
+  (c) 2026 Adam Suchi Hafizullah); see docs/licenses/NexaDash-MIT.txt.
+  app/src/main/assets/jakim/ holds official JAKIM e-Solat 2026 data (source.json).
+- DashFmPanel, DashFmController, DashFmBand, DashRadioBackend and SagaAngleView are
+  adapted from NexaDash (MIT). The standard build uses an original generic sedan
+  illustration with no manufacturer badge or plate. Legacy Saga artwork can be
+  used from a private local debug overlay where its use is authorized.
+- The launcher wallpaper picker includes procedural wallpapers (Wallpapers.java).
+  The ten Premium Themes use the original PNGs supplied by the project owner,
+  bundled under app/src/main/assets/themes/. Confirm public redistribution rights
+  for those PNGs before publishing. Icons displayed for installed third-party
+  apps come from the installed apps. Their artwork, logos and trademarks belong
+  to their respective owners. iDash draws its built-in control symbols.
+- Typeface: Inter and Inter Display (c) The Inter Project Authors, SIL Open Font License 1.1
+  (docs/licenses/Inter-OFL.txt); converted from the inter-ui 4.1.1 web fonts (latin subset) to TTF.
+  SF Pro is NOT included: Apple's licence does not allow redistribution in an Android app.
+- Gradle wrapper: Apache License 2.0 (gradle/wrapper/LICENSE).
+
+- An optional local debug overlay may load the legacy SysAdminDoc/iOSIconPack
+  artwork for private development. The pack is outside the standard source
+  tree and is not shipped in a release APK.
+
+- The optional iOS26 panel treatment is an Android adaptation of the visual
+  concepts in the pinned pack fetch_icons.py (_liquid_glass_transform); it
+  reuses iDash cached frost and does not import an Apple/iOS panel renderer.
+
+Drive Dashboard map
+- osmdroid-android 6.1.20, Apache License 2.0, https://github.com/osmdroid/osmdroid.
+  License and attribution are bundled in app/src/main/assets/licenses/.
+- Map data © OpenStreetMap contributors (ODbL), https://www.openstreetmap.org/copyright.
+  OSM standard tiles are used for visible map areas with attribution, an application User-Agent,
+  HTTP caching and a bounded cache; no offline region/bulk download feature is provided.
+
+Drive weather data, when enabled, is requested from Open-Meteo (https://open-meteo.com/).
+Open-Meteo data attribution/license: https://open-meteo.com/en/terms (CC BY 4.0 data).
+The app displays the provider credit; no weather service data is bundled as live data.
+Official BitChord rail artwork is copied unchanged from kushagrasinghx/BitChord
+at acf219a7e4a7f52f026d4336d5c7ac5cf7bfafcc; its source is included under bitchord/.

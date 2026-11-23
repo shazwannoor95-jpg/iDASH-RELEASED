@@ -1,0 +1,691 @@
+package com.shazwan.idash3;
+
+import android.app.*;
+import android.os.*;
+import android.content.*;
+import android.content.pm.*;
+import android.content.res.Configuration;
+import android.graphics.*;
+import android.graphics.drawable.*;
+import android.media.AudioManager;
+import android.provider.Settings;
+import android.text.*;
+import android.view.*;
+import android.widget.*;
+import java.text.*;
+import java.util.*;
+import java.util.concurrent.*;
+
+/** Native Android launcher with a source-integrated music module. No privileged hosting or vehicle commands. */
+public class LauncherActivity extends androidx.appcompat.app.AppCompatActivity {
+    final Handler main = new Handler(Looper.getMainLooper());
+    final ExecutorService worker = Executors.newSingleThreadExecutor();
+    final ExecutorService networkWorker = Executors.newSingleThreadExecutor();
+    boolean appsLoading, appsReloadRequested;
+    final ArrayList<App> apps = new ArrayList<>();
+    final String[] slots = {"Bluetooth", "Files", "YouTube"};
+    final int[] colors = {0xff007aff,0xff168cff,0xffff163d};
+    final String[] symbols = {"ᛒ", "▤", "▶"};
+    LinearLayout shell, body, grid; FrameLayout stage; EditText search;
+    TextView clock, date, calendarDay, statusTime, drawerCount, jakimText, jakimNext;
+    private final Date clockMoment=new Date();private SimpleDateFormat clockFormat,dayFormat,statusFormat;
+    private Locale clockLocale;private TimeZone clockZone;private boolean clock24;private long clockMinute=Long.MIN_VALUE;
+    Map<String,JakimCalendar.Day> jakimDays=Collections.emptyMap();String loadedZone="",jakimDayKey=""; long jakimMinute=-1; boolean jakimLoading;
+    android.content.SharedPreferences prefs;
+    String page = "home", query = ""; String settingsSection=""; QuickControls quickControls;AppearanceEditor appearanceEditor;DashSettings settingsScreen;SettingsNavigation settingsNavigation;
+    boolean loaded, destroyed, resumed, foregroundVisible; ImageView wallpaperView; View wallpaperShade;
+    int theme; // Legacy blue/rose gradient preference.
+    ThemeEngine.Theme appearanceTheme = ThemeEngine.DEFAULT;
+    private Wallpaper wallpaperBase;
+    boolean panelVisible; LinearLayout panelBox; DashWebPlayer webPanel; FmPanelHost fmPanel; SagaAngleView carPanel;
+    PrayerJourneyView prayerJourney;
+    String libraryReturnPage="home";DriveViewport driveViewport;
+    private int driveDrawerCapacity = Integer.MAX_VALUE;
+    DriveDashboard driveDashboard;DrivingWorkspace drivingWorkspace;int drivingTab;
+    int libraryPage; int homePage; HomeGrid homeGrid; private final GlassPerf.Watcher frameWatcher=new GlassPerf.Watcher(); private boolean watching;
+    AlertDialog wallpaperDialog; Bitmap wallpaperBitmap, driveArtwork; String requestedWallpaper; int wallpaperGeneration;
+    final Runnable ticker = new Runnable() { public void run() { updateClock(); if (foregroundVisible) main.postDelayed(this, 1000); } };
+
+    static final class App {
+        String label, component; Bitmap icon;
+        App(String l, String c, Bitmap i) { label=l; component=c; icon=i; }
+    }
+    int dp(float n) { return Math.round(n * getResources().getDisplayMetrics().density); }
+    @Override public void onCreate(Bundle state) {
+        super.onCreate(state);
+        getOnBackPressedDispatcher().addCallback(this,new androidx.activity.OnBackPressedCallback(true){public void handleOnBackPressed(){handleDashboardBack();}});
+        prefs=getSharedPreferences("idash",MODE_PRIVATE); GlassPerf.load(this); theme=GlassAppearance.integer(prefs,"theme",0); appearanceTheme=ThemeEngine.restore(prefs); migrateFavorites(); migratePanelPreferences();if(!prefs.getBoolean("prayer_visibility_v2",false))prefs.edit().putBoolean("jakim",true).putBoolean("prayer_visibility_v2",true).apply();
+        if(!prefs.contains("wallpaper"))prefs.edit().putString("wallpaper",theme==1?"":Wallpapers.DEFAULT).apply();
+        if(state!=null) { driveDrawerCapacity=state.getInt("drive_drawer_capacity",Integer.MAX_VALUE);libraryReturnPage="drive".equals(state.getString("library_return"))?"drive":"home";if(state.getBoolean("drive_viewport",false))driveViewport=DriveViewport.of(state.getDouble("drive_lat",Double.NaN),state.getDouble("drive_lon",Double.NaN),state.getDouble("drive_zoom",Double.NaN)); libraryPage=Math.max(0,state.getInt("library_page",0));homePage=Math.max(0,state.getInt("home_page",0));panelVisible=state.getBoolean("panel",false); page=state.getString("page","home"); query=state.getString("query","");settingsSection=state.getString("settings_section","");drivingTab=DrivingTemplates.tab(state.getInt("driving_tab",0)); }
+        libraryQuery=query.toLowerCase(Locale.ROOT).trim();
+        getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN,WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        immersive(); if(isNativeMusicIntent(getIntent())){page="drive";prefs.edit().putInt("dashboard_panel",4).apply();com.music.bitchord.BitChordEmbedded.consumeIntent(getIntent());} render(); loadApps();
+    }
+    @Override public void onWindowFocusChanged(boolean focused){super.onWindowFocusChanged(focused);if(focused)UltraGlassSkin.resume(this);else UltraGlassSkin.pause(this);}
+    void immersive() { getWindow().getDecorView().setSystemUiVisibility(5894); }
+    @Override protected void onStart(){super.onStart();foregroundVisible=true;}
+    @Override protected void onStop(){foregroundVisible=false;UltraGlassSkin.pause(this);if(driveDashboard!=null)driveDashboard.pause();if(drivingWorkspace!=null)drivingWorkspace.pause();if(quickControls!=null)quickControls.pause();if(webPanel!=null)webPanel.pause();if(fmPanel!=null)fmPanel.pause();if(carPanel!=null)carPanel.pause();main.removeCallbacks(ticker);super.onStop();}
+    @Override protected void onResume() { super.onResume(); resumed=true;if(driveDashboard!=null)driveDashboard.resume();if(drivingWorkspace!=null)drivingWorkspace.resume();if(appearanceEditor!=null)appearanceEditor.resume();if(quickControls!=null)quickControls.resume(); main.removeCallbacks(ticker); ticker.run(); immersive();if(webPanel!=null)webPanel.resume();if(fmPanel!=null)fmPanel.resume();if(carPanel!=null)carPanel.resume(); startFrameWatch();UltraGlassSkin.resume(this); }
+    @Override protected void onPause() { resumed=false;UltraGlassSkin.pause(this);if(prayerJourney!=null)prayerJourney.stop();if(driveDashboard!=null)driveDashboard.pause();if(drivingWorkspace!=null)drivingWorkspace.pause();stopFrameWatch();if(appearanceEditor!=null)appearanceEditor.pause();if(quickControls!=null)quickControls.pause();main.removeCallbacks(ticker);if(webPanel!=null)webPanel.pause();if(fmPanel!=null)fmPanel.pause();if(carPanel!=null)carPanel.pause(); super.onPause(); }
+    @Override protected void onDestroy() { destroyed=true;driveArtwork=null;UltraGlassSkin.release(this);if(driveDashboard!=null)driveDashboard.close();if(drivingWorkspace!=null)drivingWorkspace.close();if(settingsNavigation!=null)settingsNavigation.close();if(settingsScreen!=null)settingsScreen.close();if(appearanceEditor!=null)appearanceEditor.close();IosStyle.releaseGlass(this);if(quickControls!=null){quickControls.close();}if(wallpaperDialog!=null)wallpaperDialog.dismiss();disposePanel(); main.removeCallbacksAndMessages(null); worker.shutdownNow(); networkWorker.shutdownNow(); super.onDestroy(); }
+    @Override public void onTrimMemory(int level){super.onTrimMemory(level);if(level>=android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW){driveArtwork=null;Ios26Icons.clear();GlassBake.trim();}}
+    @Override protected void onSaveInstanceState(Bundle out) { if(driveDashboard!=null)driveDashboard.captureViewport();out.putString("library_return",libraryReturnPage);out.putInt("drive_drawer_capacity",driveDrawerCapacity);if(driveViewport!=null){out.putBoolean("drive_viewport",true);out.putDouble("drive_lat",driveViewport.latitude);out.putDouble("drive_lon",driveViewport.longitude);out.putDouble("drive_zoom",driveViewport.zoom);}out.putInt("library_page",libraryPage);out.putInt("home_page",homePage);out.putInt("driving_tab",drivingTab);out.putBoolean("panel",panelVisible);out.putString("page",page);out.putString("settings_section",settingsSection); out.putString("query",query); super.onSaveInstanceState(out); }
+    @Override public void onConfigurationChanged(Configuration config) { super.onConfigurationChanged(config); render(); }
+    @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); setIntent(intent); if(isNativeMusicIntent(intent)){page="drive";prefs.edit().putInt("dashboard_panel",4).apply();com.music.bitchord.BitChordEmbedded.consumeIntent(intent);if(driveDashboard!=null&&"drive".equals(page)){driveDashboard.setMode(4);}else render();return;} if("home".equals(page)&&!panelVisible)return;libraryReturnPage="home";page="home";query="";hideKeyboard();render(); }
+    /** Real frame durations feed the low-performance policy; nothing runs while no frames are drawn. */
+    void startFrameWatch(){if(watching)return;try{frameWatcher.reset();getWindow().addOnFrameMetricsAvailableListener(frameWatcher,main);watching=true;}catch(RuntimeException unsupported){watching=false;}}
+    void stopFrameWatch(){if(!watching)return;watching=false;try{getWindow().removeOnFrameMetricsAvailableListener(frameWatcher);}catch(RuntimeException ignored){}}
+    /** Feeds touch position to glass surfaces for the moving specular highlight; never consumes events. */
+    @Override public boolean dispatchTouchEvent(android.view.MotionEvent e){
+        if(!GlassPerf.low()){int act=e.getActionMasked();if(act==android.view.MotionEvent.ACTION_DOWN||act==android.view.MotionEvent.ACTION_MOVE||act==android.view.MotionEvent.ACTION_UP||act==android.view.MotionEvent.ACTION_CANCEL){GlassBackdrop b=IosStyle.backdrops.get(this);if(b!=null)for(int i=b.surfaces.size()-1;i>=0;i--){GlassSurface g=b.surfaces.get(i).get();if(g!=null)g.onScreenTouch(e.getRawX(),e.getRawY(),act);}}}
+        return super.dispatchTouchEvent(e);
+    }
+    void goHome() {
+        if (quickControls != null) quickControls.close();
+        hideKeyboard();
+        page = "home";
+        query = "";
+        libraryReturnPage = "home";
+        panelVisible = false;
+        render();
+    }
+    void handleDashboardBack() { if(homeGrid!=null&&homeGrid.closeFolder())return;if(webPanel!=null&&webPanel.exitFullscreen())return;if("apps".equals(page)){closeApps();return;}if("drive".equals(page)&&driveDashboard!=null&&driveDashboard.back())return;if("road".equals(page)&&drivingWorkspace!=null&&drivingWorkspace.back())return;if("settings".equals(page)&&!settingsSection.isEmpty()){settingsSection="";render();return;}if(!"home".equals(page)) { page="home"; query=""; hideKeyboard(); render(); }else if(panelVisible){panelVisible=false;render();} }
+    @Override public void startActivity(Intent intent, Bundle options){
+        if(driveDashboard!=null&&driveDashboard.mode==4&&com.music.bitchord.BitChordEmbedded.routeInHost(intent))return;
+        super.startActivity(intent,options);
+    }
+    boolean isNativeMusicIntent(Intent intent){return intent!=null&&(intent.getBooleanExtra("idash.openMusic",false)||(intent.getComponent()!=null&&"com.music.bitchord.MainActivity".equals(intent.getComponent().getClassName())));}
+    void hideKeyboard() { ((android.view.inputmethod.InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(shell.getWindowToken(),0); }
+
+    Drawable glass(int color, int radius) {
+        return IosStyle.glass(this,color,radius);
+    }
+    private Drawable themedGlass(int originalTint, int radius, int themeTint) {
+        return IosStyle.glass(this, originalTint, radius, false, IosStyle.backdrop(this),
+                themeTint);
+    }
+    LinearLayout row() { LinearLayout l=new LinearLayout(this); l.setOrientation(LinearLayout.HORIZONTAL); l.setGravity(Gravity.CENTER_VERTICAL); return l; }
+    LinearLayout column() { LinearLayout l=new LinearLayout(this); l.setOrientation(LinearLayout.VERTICAL); return l; }
+    TextView text(String value, float size, int color) { TextView t=new TextView(this); t.setText(value); t.setTextSize(size); t.setTextColor(color==Color.WHITE?appearanceTheme.text:color); t.setTypeface(IosStyle.font(this,false));t.setFontFeatureSettings("tnum"); return t; }
+    private final WeakHashMap<TextView, Boolean> wallpaperLabels = new WeakHashMap<>();
+    TextView wallpaperLabel(String value, float size, boolean shadow) {
+        TextView label = text(value, size, Color.WHITE);
+        wallpaperLabels.put(label, shadow);
+        updateWallpaperLabel(label, shadow);
+        return label;
+    }
+
+    private void updateWallpaperLabel(TextView label, boolean shadow) {
+        int ink = !"apps".equals(page) && appearanceTheme.wallpaperId().equals(requestedWallpaper)
+                ? appearanceTheme.wallpaperText : Color.WHITE;
+        label.setTextColor(ink);
+        if (shadow) label.setShadowLayer(dp(2), 0, dp(1), ink == Color.WHITE ? 0x88000000 : 0x88ffffff);
+    }
+    TextView button(String label, Runnable action) {
+        TextView t=text(label,14,Color.WHITE); t.setGravity(Gravity.CENTER); t.setMinHeight(dp(48)); t.setPadding(dp(16),0,dp(16),0);
+        t.setBackground(themedGlass(0x39ffffff,22,appearanceTheme.buttonTint)); t.setContentDescription(label); t.setOnClickListener(v->action.run()); return t;
+    }
+    void title(LinearLayout target,String value,String subtitle) { TextView t=text(value,26,Color.WHITE); t.setTypeface(IosStyle.font(this,true)); target.addView(t); TextView sub=text(subtitle,12,0xcce6eaff); sub.setPadding(0,dp(3),0,dp(12)); target.addView(sub); }
+    void render() {
+        if(settingsNavigation==null)settingsNavigation=new SettingsNavigation(this);
+        if(settingsNavigation.defer())return;
+        UltraGlassSkin.release(this);
+        if(settingsScreen!=null){settingsScreen.close();settingsScreen=null;}
+        if(appearanceEditor!=null)appearanceEditor.close();
+        if(driveDashboard!=null){driveDashboard.close();driveDashboard=null;}if(drivingWorkspace!=null){drivingWorkspace.close();drivingWorkspace=null;}
+        disposePanel();prayerJourney=null;homeGrid=null;clock=null;date=null;calendarDay=null;clockMinute=Long.MIN_VALUE;jakimText=null;jakimNext=null;search=null;grid=null;
+        wallpaperLabels.clear();
+        stage=new FrameLayout(this); wallpaperBase=new Wallpaper(this);stage.addView(wallpaperBase,new FrameLayout.LayoutParams(-1,-1));
+        wallpaperView=new ImageView(this);wallpaperView.setScaleType(ImageView.ScaleType.CENTER_CROP);stage.addView(wallpaperView,new FrameLayout.LayoutParams(-1,-1));wallpaperShade=new View(this);wallpaperShade.setBackgroundColor(0x35000000);stage.addView(wallpaperShade,new FrameLayout.LayoutParams(-1,-1));updateBackdrop();
+        ensureWallpaper();
+        final boolean home="home".equals(page);final int edge=home?20:28,top=home?8:12,bottom=home?8:10;
+        shell=column(); shell.setPadding(dp(edge),dp(top),dp(edge),dp(bottom));
+        stage.addView(shell,new FrameLayout.LayoutParams(-1,-1)); setContentView(stage);
+        if("drive".equals(page)){
+            statusTime=null;body=column();shell.setPadding(dp(8),dp(8),dp(8),dp(8));shell.addView(body,new LinearLayout.LayoutParams(-1,-1));
+            new ContentInsets(this,stage,shell,dp(8),dp(8),dp(4),dp(8));
+            driveDashboard=new DriveDashboard(this);body.addView(driveDashboard,new LinearLayout.LayoutParams(-1,-1));updateClock();PageGlassSkin.apply(this,shell,body,page);return;
+        }
+        // Dedicated workspace has its own rail/tabs; Home's glass chrome stays on Home.
+        if("road".equals(page)){
+            statusTime=null;body=column();shell.setPadding(dp(8),dp(8),dp(8),dp(8));shell.addView(body,new LinearLayout.LayoutParams(-1,-1));
+            drivingWorkspace=new DrivingWorkspace(this);body.addView(drivingWorkspace,new LinearLayout.LayoutParams(-1,-1));updateClock();return;
+        }
+        if(home){int vertical=getResources().getConfiguration().fontScale>1.10f?4:8;new ContentInsets(this,stage,shell,dp(20),dp(vertical),dp(panelVisible?4:20),dp(vertical));}
+        else stage.setOnApplyWindowInsetsListener((v,insets)-> { shell.setPadding(dp(edge)+insets.getSystemWindowInsetLeft(),dp(top)+insets.getSystemWindowInsetTop(),dp(edge)+insets.getSystemWindowInsetRight(),dp(bottom)+insets.getSystemWindowInsetBottom()); return insets; });
+        LinearLayout status=row();boolean panelActions=home&&panelVisible; statusTime=wallpaperLabel("",13,false); statusTime.setTypeface(IosStyle.font(this,true)); status.addView(statusTime,new LinearLayout.LayoutParams(0,dp(48),1)); statusTime.setGravity(Gravity.CENTER_VERTICAL);
+        statusTime.setSingleLine(true);statusTime.setAutoSizeTextTypeUniformWithConfiguration(9,13,1,android.util.TypedValue.COMPLEX_UNIT_SP);
+        status.addView(headerAction("Panel",4,()->{panelVisible=!panelVisible;page="home";render();}));
+        status.addView(headerAction("Customize",5,this::customize));
+        status.addView(headerAction("Control Center",6,this::controlCenter));
+        if("apps".equals(page))addLibraryActions(status);
+        if(panelActions){status.addView(panelAction("Apps",this::panelMode));status.addView(panelAction("Layout",this::panelLayout));status.addView(panelAction("Close",()->{panelVisible=false;render();}));}shell.addView(status);
+        body=column(); shell.addView(body,new LinearLayout.LayoutParams(-1,0,1));
+        if("apps".equals(page)) buildDrawer();else if("settings".equals(page)){settingsScreen=new DashSettings(this);settingsScreen.build(body);}else buildHome();
+        buildDock(); updateClock();PageGlassSkin.apply(this,shell,body,page);IosStyle.enter(body);
+    }
+    void buildHome() {
+        boolean tightHeader=getResources().getConfiguration().fontScale>1.10f;
+        LinearLayout heading=row(); LinearLayout words=column();
+        TextView greeting=wallpaperLabel("Shazwan's Saga",22,false);greeting.setTypeface(IosStyle.display(this,true));greeting.setLetterSpacing(-.01f);greeting.setIncludeFontPadding(false);greeting.setMaxLines(1);greeting.setEllipsize(TextUtils.TruncateAt.END);greeting.setAutoSizeTextTypeUniformWithConfiguration(14,tightHeader?15:20,1,android.util.TypedValue.COMPLEX_UNIT_SP);words.addView(greeting);TextView intro=text("Your drive. Your space.",11,0xcce6eaff);intro.setIncludeFontPadding(false);intro.setPadding(0,tightHeader?0:dp(2),0,tightHeader?0:dp(3));intro.setVisibility(View.GONE);words.addView(intro); heading.addView(words,new LinearLayout.LayoutParams(0,-2,1));
+        LinearLayout.LayoutParams hp=new LinearLayout.LayoutParams(-1,-2);hp.bottomMargin=tightHeader?dp(2):dp(10);
+        LinearLayout content=row(); content.setGravity(Gravity.TOP); body.addView(content,new LinearLayout.LayoutParams(-1,0,1));
+        HomeWidgets widgets=new HomeWidgets(this);LinearLayout left=column();LinearLayout.LayoutParams wp=new LinearLayout.LayoutParams(0,-1,0.37f);wp.rightMargin=dp(16);content.addView(left,wp);left.addView(heading,hp);left.addView(widgets,new LinearLayout.LayoutParams(-1,0,1));
+        LinearLayout timeCard=column();timeCard.setMinimumHeight(dp(88));timeCard.setBackground(glass(0x7c20395d,26));
+        timeCard.setGravity(Gravity.CENTER);timeCard.setForeground(new NeonGlassRim(this,26));TextView eyebrow=text("TODAY",11,0xffff8a80);eyebrow.setTypeface(IosStyle.font(this,true));eyebrow.setLetterSpacing(.08f);eyebrow.setGravity(Gravity.CENTER);eyebrow.setTag(GlassSurface.NO_SCRIM);eyebrow.setTextColor(0xffff9f9a);eyebrow.setShadowLayer(dp(2),0,dp(1),0x66000000);if(prefs.getBoolean("calendar",true)){eyebrow.setContentDescription("Calendar widget");timeCard.addView(eyebrow,new LinearLayout.LayoutParams(-1,-2));widgets.fitText(eyebrow,11,10);}
+        clock=text("",36,Color.WHITE);clock.setTypeface(IosStyle.display(this,false));clock.setLetterSpacing(-.02f);clock.setMaxLines(1);clock.setGravity(Gravity.CENTER);clock.setAutoSizeTextTypeUniformWithConfiguration(24,36,1,android.util.TypedValue.COMPLEX_UNIT_SP);timeCard.addView(clock,new LinearLayout.LayoutParams(-1,-2));widgets.fitText(clock,36,24);
+        date=text("",12,0xd9ffffff);date.setTypeface(IosStyle.medium(this));date.setMaxLines(1);date.setGravity(Gravity.CENTER);date.setAutoSizeTextTypeUniformWithConfiguration(10,12,1,android.util.TypedValue.COMPLEX_UNIT_SP);timeCard.addView(date,new LinearLayout.LayoutParams(-1,-2));widgets.fitText(date,12,10);timeCard.setContentDescription("Clock widget");timeCard.setOnClickListener(v->openSettings(Settings.ACTION_DATE_SETTINGS));widgets.addView(timeCard,new LinearLayout.LayoutParams(-1,-2));
+        // The separate Today card was merged into the clock card ("TODAY" + date); calendarDay mirrors the date.
+        if(prefs.getBoolean("calendar",true)){calendarDay=text("",18,Color.WHITE);timeCard.setOnClickListener(v->showCalendar());}
+        if(prefs.getBoolean("jakim",true)) {
+            LinearLayout card=column();card.setGravity(Gravity.CENTER_HORIZONTAL);card.setMinimumHeight(dp(48));card.setBackground(glass(0x682b426a,26));card.setContentDescription("JAKIM calendar widget");
+            jakimNext=text("Waktu solat",18,Color.WHITE);jakimNext.setTypeface(IosStyle.font(this,true));jakimNext.setMaxLines(1);jakimNext.setGravity(Gravity.CENTER);jakimNext.setAutoSizeTextTypeUniformWithConfiguration(13,18,1,android.util.TypedValue.COMPLEX_UNIT_SP);jakimNext.setVisibility(prefs.getBoolean("prayer_countdown",true)?View.VISIBLE:View.GONE);jakimNext.setVisibility(View.GONE);card.addView(jakimNext,new LinearLayout.LayoutParams(-1,-2));widgets.fitText(jakimNext,18,13);jakimText=text("",12.5f,0xe0ffffff);jakimText.setGravity(Gravity.CENTER);jakimText.setLineSpacing(0,1.12f);LinearLayout.LayoutParams jp=new LinearLayout.LayoutParams(-1,-2);jp.topMargin=dp(3);jakimText.setVisibility(View.GONE);card.addView(jakimText,jp);prayerJourney=new PrayerJourneyView(this);card.setBackground(null);card.addView(prayerJourney,new LinearLayout.LayoutParams(-1,dp(160)));widgets.fitText(jakimText,12.5f,11);card.setOnClickListener(v->jakimDialog());widgets.addView(card,Math.min(1,widgets.getChildCount()),new LinearLayout.LayoutParams(-1,-2));updateJakim();loadJakim(false);
+        }
+        if(panelVisible){panelBox=column();panelBox.setPadding(dp(4),dp(4),dp(4),dp(4));panelBox.setBackground(glass(0x77324461,24));panelBox.setContentDescription("Optional media panel");LinearLayout.LayoutParams pp=new LinearLayout.LayoutParams(0,-1,.63f);pp.topMargin=dp(4);content.addView(panelBox,pp);buildPanel();}
+        else if(!prefs.getBoolean(HomeGrid.ENABLED,false))content.addView(new View(this),new LinearLayout.LayoutParams(0,-1,.63f));
+        else {homeGrid=new HomeGrid(this);LinearLayout.LayoutParams gp=new LinearLayout.LayoutParams(0,-1,.63f);gp.topMargin=dp(8);content.addView(homeGrid,gp);if(loaded)homeGrid.setApps(apps);}
+    }
+    View shortcut(int slot,boolean dock) {
+        LinearLayout tile=column(); tile.setGravity(Gravity.CENTER);tile.setPadding(dp(4),dp(2),dp(4),dp(2));
+        App app=assigned(slot); int size=dock?(dockIconSize()):54;
+        FrameLayout icon=new FrameLayout(this);
+        int[] tops={0xff36b4ff,0xff48baff,0xffff4c6c};
+        int[] bottoms={0xff0055ee,0xff0660ed,0xffe60027};
+        icon.setBackground(new Squircle.Tile(tops[slot],bottoms[slot],getResources().getDisplayMetrics().density));icon.setElevation(dp(dock?3:5));
+        if(slot==1){ImageView files=new ImageView(this);files.setImageResource(R.drawable.ic_dock_files);files.setScaleType(ImageView.ScaleType.FIT_CENTER);icon.addView(files,new FrameLayout.LayoutParams(-1,-1));}
+        else icon.addView(new FavoriteGlyph(this,slot),new FrameLayout.LayoutParams(-1,-1));
+        Bitmap packed = null;
+        // The Bluetooth slot has its own symbol, even when a vendor app supplies a phone icon.
+        if (slot != 0 && Ios26Icons.available() && prefs.getBoolean("ios_icons", true)) {
+            packed = app == null ? Ios26Icons.named(this, slot == 1 ? "files" : "youtube")
+                    : Ios26Icons.app(this, app.component, app.label);
+        }
+        if (packed == null && app != null && slot != 0) packed = app.icon;
+        if(packed!=null){icon.removeAllViews();icon.setBackground(null);ImageView image=new ImageView(this);image.setImageBitmap(packed);icon.addView(image,new FrameLayout.LayoutParams(-1,-1));}
+        tile.addView(icon,new LinearLayout.LayoutParams(dp(size),dp(size)));
+        TextView label=text(slots[slot],dock?9:12,Color.WHITE); label.setIncludeFontPadding(false);label.setMaxLines(1);label.setEllipsize(TextUtils.TruncateAt.END);label.setGravity(Gravity.CENTER);LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(-1,dock?dockLabelHeight():dp(22));lp.topMargin=dp(dock?2:3);tile.addView(label,lp);
+        Elastic.attach(tile);tile.setContentDescription("Favorite "+slots[slot]);tile.setOnClickListener(v->{App current=assigned(slot);if(current==null)pick(slot);else launch(current);});tile.setOnLongClickListener(v->{pick(slot);return true;});return tile;
+    }
+    void buildDock() {
+        LinearLayout outer=row();outer.setGravity(Gravity.CENTER);LinearLayout.LayoutParams op=new LinearLayout.LayoutParams(-1,dockHeight());op.topMargin=dp(8);shell.addView(outer,op);
+        LinearLayout dock=row();dock.setGravity(Gravity.CENTER);dock.setPadding(dp(12),dp(8),dp(12),dp(8));dock.setContentDescription("Launcher dock");dock.setBackground(themedGlass(0x75e5eaff,22,appearanceTheme.dockTint));dock.setElevation(dp(8));if("home".equals(page))dock.setForeground(new NeonGlassRim(this,22));outer.addView(dock,new LinearLayout.LayoutParams(-2,-1));
+        for(int i=0;i<slots.length;i++) dock.addView(shortcut(i,true),new LinearLayout.LayoutParams(dp(dockItemWidth()),-1));
+        View divider=new View(this);divider.setBackgroundColor(0x40ffffff);LinearLayout.LayoutParams d=new LinearLayout.LayoutParams(dp(1),dp(32));d.setMargins(dp(6),0,dp(6),0);dock.addView(divider,d);
+        dock.addView(dockAction("⚙","Settings",()->{settingsSection="";page="settings";render();}),new LinearLayout.LayoutParams(dp(dockItemWidth()),-1));
+        dock.addView(dockAction("◎","Drive",()->{page="drive";render();}),new LinearLayout.LayoutParams(dp(dockItemWidth()),-1));
+        dock.addView(dockAction("▦","Apps",()-> {if("apps".equals(page))closeApps();else showApps();}),new LinearLayout.LayoutParams(dp(dockItemWidth()),-1));
+    }
+    View dockAction(String glyph,String label,Runnable action) {
+        LinearLayout l=column();l.setGravity(Gravity.CENTER);l.setPadding(dp(4),dp(2),dp(4),dp(2));View icon;
+        FrameLayout tile=new FrameLayout(this);boolean settings="Settings".equals(label),drive="Drive".equals(label);float density=getResources().getDisplayMetrics().density;
+        tile.setBackground(new Squircle.Tile(appearanceTheme.iconTop,appearanceTheme.iconBottom,density));tile.setElevation(dp(3));
+        tile.addView(new DockGlyph(this,settings?DockGlyph.SETTINGS:drive?DockGlyph.DRIVE:DockGlyph.APPS),new FrameLayout.LayoutParams(-1,-1));icon=tile;
+        if(settings&&prefs.getBoolean("ios_icons",true)){Bitmap packed=Ios26Icons.named(this,"settings");if(packed!=null){tile.removeAllViews();tile.setBackground(null);ImageView image=new ImageView(this);image.setImageBitmap(packed);tile.addView(image,new FrameLayout.LayoutParams(-1,-1));}}
+        l.addView(icon,new LinearLayout.LayoutParams(dp(dockIconSize()),dp(dockIconSize())));TextView name=text(label,9,Color.WHITE);name.setGravity(Gravity.CENTER);name.setIncludeFontPadding(false);name.setSingleLine(true);name.setEllipsize(TextUtils.TruncateAt.END);LinearLayout.LayoutParams nameBounds=new LinearLayout.LayoutParams(-1,dockLabelHeight());nameBounds.topMargin=dp(2);l.addView(name,nameBounds);l.setContentDescription(label);l.setOnClickListener(v->action.run());Elastic.attach(l);return l;
+    }
+    void showDriveApps(int capacity) {
+        driveDrawerCapacity = capacity;
+        showApps();
+    }
+    void showApps() {if(!"apps".equals(page))libraryReturnPage="drive".equals(page)?"drive":"home";page="apps";render();}
+    void closeApps(){page="drive".equals(libraryReturnPage)?"drive":"home";query="";hideKeyboard();render();}
+    int dockIconSize(){return prefs.getInt("dock_size",0)==0?28:34;}
+    int dockItemWidth(){return prefs.getInt("dock_size",0)==0?52:58;}
+    int dockLabelHeight(){return Math.max(dp(14),(int)Math.ceil(12*getResources().getDisplayMetrics().scaledDensity));}
+    int dockHeight(){return Math.max(dp(prefs.getInt("dock_size",0)==0?64:72),dp(dockIconSize()+22)+dockLabelHeight());}
+    View libraryAction(String label,Runnable action){
+        TextView v=text(label,10,Color.WHITE);v.setGravity(Gravity.CENTER);v.setSingleLine(true);v.setFocusable(true);v.setContentDescription(label);
+        v.setBackground(new InsetDrawable(glass(0x55e1eaff,16),0,dp(7),0,dp(7)));
+        v.setForeground(new InsetDrawable(new LiquidGlassStrokeDrawable(getResources().getDisplayMetrics().density,16),0,dp(7),0,dp(7)));
+        LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(dp("Urus Sidebar".equals(label) ? 80 : "Lagi app".equals(label) ? 64 : "Refresh".equals(label) ? 60 : 52),dp(48));lp.leftMargin=dp(4);v.setLayoutParams(lp);v.setOnClickListener(w->action.run());return v;
+    }
+    void addLibraryActions(LinearLayout target){if ("drive".equals(libraryReturnPage)) {
+        if (!driveOverflow().isEmpty()) target.addView(libraryAction("Lagi app", this::showDriveOverflow));
+        target.addView(libraryAction("Urus Sidebar", () -> {
+            if (loaded) new SidebarApps(this).edit(this::render);
+            else Toast.makeText(this,"Senarai app sedang dimuatkan",Toast.LENGTH_SHORT).show();
+        }));
+    }target.addView(libraryAction("Search",()->{boolean show=search.getVisibility()!=View.VISIBLE;search.setVisibility(show?View.VISIBLE:View.GONE);drawerCount.setVisibility(show?View.VISIBLE:View.GONE);if(show){search.requestFocus();((android.view.inputmethod.InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).showSoftInput(search,android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);}else{search.setText("");hideKeyboard();}}));target.addView(libraryAction("Refresh",this::loadApps));target.addView(libraryAction("Done",this::closeApps)); }
+    private LinkedHashMap<String, String> driveOverflow() {
+        SidebarApps sidebar = new SidebarApps(this);
+        LinkedHashMap<String, String> catalog = sidebar.catalog();
+        LinkedHashMap<String, String> overflow = new LinkedHashMap<>();
+        int position = 0;
+        for (String key : sidebar.selected(catalog)) {
+            String label = catalog.get(key);
+            if (label != null && position++ >= driveDrawerCapacity) overflow.put(key, label);
+        }
+        return overflow;
+    }
+
+    private void showDriveOverflow() {
+        LinkedHashMap<String, String> overflow = driveOverflow();
+        ArrayList<String> keys = new ArrayList<>(overflow.keySet());
+        new AlertDialog.Builder(this).setTitle("Aplikasi lebihan Sidebar")
+                .setItems(overflow.values().toArray(new String[0]), (dialog, index) -> {
+                    String key = keys.get(index);
+                    int mode = SidebarApps.mode(key);
+                    if (mode >= 0) {
+                        prefs.edit().putInt("dashboard_panel", mode).apply();
+                        closeApps();
+                        return;
+                    }
+                    for (App app : apps) {
+                        if (!app.component.equals(key)) continue;
+                        launch(app);
+                        break;
+                    }
+                }).setNegativeButton("Tutup", null).show();
+    }
+    void buildDrawer() {
+        LinearLayout header=row();LinearLayout words=column();TextView compact=text("App Library · Ringkas ›",18,Color.WHITE);compact.setContentDescription("Open driving workspace");compact.setMinHeight(dp(56));compact.setGravity(Gravity.CENTER_VERTICAL);compact.setOnClickListener(v->{page="road";render();});words.addView(compact);header.addView(words,new LinearLayout.LayoutParams(0,-2,1));body.addView(header);
+        search=new EditText(this);search.setSingleLine();search.setTextSize(16);search.setTextColor(Color.WHITE);search.setHintTextColor(0xffd0d8ec);search.setHint("Search apps");search.setContentDescription("Search apps");search.setPadding(dp(20),0,dp(20),0);search.setBackground(glass(0x55ffffff,18));search.setText(query);search.setVisibility(query.isEmpty()?View.GONE:View.VISIBLE);body.addView(search,new LinearLayout.LayoutParams(-1,dp(48)));
+        drawerCount=text("",11,0xcce6eaff);drawerCount.setPadding(dp(6),dp(6),0,0);drawerCount.setVisibility(query.isEmpty()?View.GONE:View.VISIBLE);body.addView(drawerCount,new LinearLayout.LayoutParams(-1,dp(26)));
+        grid=new AppLibraryGrid(this);body.addView(grid,new LinearLayout.LayoutParams(-1,0,1));
+        search.addTextChangedListener(new TextWatcher(){public void beforeTextChanged(CharSequence s,int st,int c,int a){}public void onTextChanged(CharSequence s,int st,int b,int c){query=s.toString();filter();}public void afterTextChanged(Editable e){}});filter();
+    }
+    private String libraryQuery="";
+    void filter() {
+        if(!(grid instanceof AppLibraryGrid))return;
+        String q=query.toLowerCase(Locale.ROOT).trim();ArrayList<App> filtered=new ArrayList<>();
+        for(App app:apps)if(app.label.toLowerCase(Locale.ROOT).contains(q))filtered.add(app);
+        drawerCount.setText(!loaded?"Loading installed apps…":filtered.size()+" apps");
+        if(!q.equals(libraryQuery)){libraryPage=0;libraryQuery=q;}
+        ((AppLibraryGrid)grid).setApps(filtered);PageGlassSkin.refreshAppsGrid(this,grid);
+    }
+    App assigned(int slot) {String saved=prefs.getString("favorite_"+slots[slot],null);for(App a:apps)if(a.component.equals(saved))return a;return null;}
+    void assign(int slot,App app) {prefs.edit().putString("favorite_"+slots[slot],app.component).apply();hideKeyboard();render();}
+    void pick(int slot) {
+        if(!loaded){Toast.makeText(this,"Apps are loading…",Toast.LENGTH_SHORT).show();return;}
+        String[] labels=new String[apps.size()+1];labels[0]="Clear favorite";for(int i=0;i<apps.size();i++)labels[i+1]=apps.get(i).label;
+        new AlertDialog.Builder(this).setTitle("Choose "+slots[slot]+" app").setItems(labels,(d,which)->{if(which==0){prefs.edit().putString("favorite_"+slots[slot],"").apply();render();}else assign(slot,apps.get(which-1));}).setNegativeButton("Cancel",null).show();
+    }
+    void launch(App a) {try{startActivity(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setComponent(ComponentName.unflattenFromString(a.component)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK|Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED));if(IosStyle.motion(this))overridePendingTransition(android.R.anim.fade_in,android.R.anim.fade_out);}catch(RuntimeException e){Toast.makeText(this,"App unavailable. Hold the favorite to choose another.",Toast.LENGTH_LONG).show();loadApps();}}
+    void loadApps() {
+        if(destroyed||worker.isShutdown())return;
+        if(appsLoading){appsReloadRequested=true;return;}
+        appsLoading=true;
+        worker.execute(()->{
+            ArrayList<App> found=new ArrayList<>();boolean failed=false;
+            try{
+                PackageManager pm=getPackageManager();final int iconVariant=IconStyler.variant(prefs);final boolean iosIcons=Ios26Icons.available()&&prefs.getBoolean("ios_icons",true);final int iconTint=prefs.getInt("icon_tint",0xff6f8fc8);Set<String> seen=new HashSet<>();
+                for(ResolveInfo info:pm.queryIntentActivities(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER),0)) {
+                    if(Thread.currentThread().isInterrupted())return;
+                    if(info.activityInfo==null||info.activityInfo.packageName.equals(getPackageName()))continue;
+                    String key=new ComponentName(info.activityInfo.packageName,info.activityInfo.name).flattenToString();if(!seen.add(key))continue;
+                    try{String label=info.loadLabel(pm).toString();
+                        Bitmap bitmap=iosIcons?Ios26Icons.app(this,key,label):null;
+                        if(bitmap==null)bitmap=IconStyler.render(info.loadIcon(pm),dp(56),iconVariant,iconTint,getResources().getDisplayMetrics().density,!GlassPerf.low(),iosIcons?IosGlyphs.match(info.activityInfo.packageName,label):IosGlyphs.NONE);
+                        found.add(new App(label,key,bitmap));
+                    }catch(RuntimeException unavailable){/* Package removed during discovery. */}
+                }
+                found.sort((x,y)->x.label.compareToIgnoreCase(y.label));
+            }catch(OutOfMemoryError|RuntimeException unavailable){failed=true;}
+            final boolean unavailable=failed;
+            main.post(()->{if(destroyed)return;appsLoading=false;
+                if(!unavailable){apps.clear();apps.addAll(found);loaded=true;seedFavorites();if("apps".equals(page))filter();else if("road".equals(page)&&drivingWorkspace!=null)drivingWorkspace.appsChanged();else if("drive".equals(page)&&driveDashboard!=null)driveDashboard.rebuildRailApps();else if("home".equals(page)&&!panelVisible&&appearanceEditor==null)render();}
+                else Toast.makeText(this,"App list unavailable. Existing list kept; try Refresh later.",Toast.LENGTH_LONG).show();
+                if(appsReloadRequested){appsReloadRequested=false;loadApps();}
+            });
+        });
+    }
+    void migrateFavorites() {
+        if(prefs.getBoolean("three_favorites",false))return;
+        android.content.SharedPreferences.Editor edit=prefs.edit();
+        if(prefs.contains("slot5"))edit.putString("favorite_Bluetooth",prefs.getString("slot5",""));
+        if(prefs.contains("slot4"))edit.putString("favorite_Files",prefs.getString("slot4",""));
+        String oldVideo=prefs.getString("slot3","");
+        ComponentName video=ComponentName.unflattenFromString(oldVideo);
+        if(video!=null&&(video.getPackageName().equals("com.google.android.youtube")||video.getPackageName().equals("com.shazwan.nexadash.tizentube.next")))edit.putString("favorite_YouTube",oldVideo);
+        edit.putBoolean("three_favorites",true).apply();
+    }
+    void migratePanelPreferences(){
+        int storedMode=prefs.getInt("panel_mode",0);
+        if(storedMode<0||storedMode>2)prefs.edit().putInt("panel_mode",0).apply(); // mod 3 (SmartTube native) telah dibuang; pindah ke YouTube web, walaupun panel_modes_v2 sudah ditetapkan
+        if(prefs.getBoolean("panel_modes_v2",false))return;
+        android.content.SharedPreferences.Editor edit=prefs.edit().putInt("panel_mode",0).putBoolean("panel_modes_v2",true);
+        edit.apply();
+    }
+    void seedFavorites() {
+        String[][] hints={{"com.autochips.bluetooth"},{"com.mediatek.filemanager","com.android.documentsui","com.google.android.documentsui"},{"com.google.android.youtube"}};
+        android.content.SharedPreferences.Editor e=prefs.edit();for(int slot=0;slot<slots.length;slot++){if(prefs.contains("favorite_"+slots[slot]))continue;boolean done=false;for(String pkg:hints[slot]){for(App a:apps)if(ComponentName.unflattenFromString(a.component).getPackageName().equals(pkg)){e.putString("favorite_"+slots[slot],a.component);done=true;break;}if(done)break;}}e.apply();
+    }
+    void openSettings(String action) {try{startActivity(new Intent(action));}catch(RuntimeException unavailable){try{startActivity(new Intent(Settings.ACTION_SETTINGS));}catch(RuntimeException absent){Toast.makeText(this,"Settings unavailable on this device",Toast.LENGTH_SHORT).show();}}}
+    void controlCenter(){if(quickControls==null)quickControls=new QuickControls(this);quickControls.show();}
+    void customize(){settingsSection="Appearance";page="settings";render();}
+    View headerAction(String label,int icon,Runnable action){
+        boolean compact="apps".equals(page)||(panelVisible&&"home".equals(page));LinearLayout item=row();item.setGravity(Gravity.CENTER);
+        item.setBackground(compact?new android.graphics.drawable.InsetDrawable(glass(0x55e1eaff,16),0,dp(6),0,dp(6)):glass(0x55e1eaff,20));
+        if("home".equals(page))item.setForeground(compact?new android.graphics.drawable.InsetDrawable(new NeonGlassRim(this,16),0,dp(6),0,dp(6)):new NeonGlassRim(this,20));
+        if("apps".equals(page))item.setForeground(new InsetDrawable(new LiquidGlassStrokeDrawable(getResources().getDisplayMetrics().density,16),0,dp(6),0,dp(6)));
+        item.setPadding(dp(compact?7:10),0,dp(compact?7:10),0);item.setContentDescription(label);item.setMinimumHeight(dp(48));item.setFocusable(true);
+        item.addView(new IosStyle.Icon(this,icon),new LinearLayout.LayoutParams(dp(compact?16:22),dp(compact?16:22)));
+        TextView title=text(label,compact?11:12,Color.WHITE);title.setSingleLine(true);title.setPadding(dp(6),0,0,0);item.addView(title);
+        item.setOnClickListener(v->action.run());LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(-2,dp(48));lp.leftMargin=dp(6);item.setLayoutParams(lp);return item;
+    }
+    View controlTile(String label,int icon,int color,Runnable action){LinearLayout tile=column();tile.setGravity(Gravity.CENTER);FrameLayout disc=new FrameLayout(this);GradientDrawable fill=new GradientDrawable(GradientDrawable.Orientation.TL_BR,new int[]{color,0xcc000000|(color&0xffffff)});fill.setCornerRadius(dp(18));disc.setBackground(fill);disc.addView(new IosStyle.Icon(this,icon),new FrameLayout.LayoutParams(-1,-1));tile.addView(disc,new LinearLayout.LayoutParams(dp(48),dp(48)));TextView caption=text(label,13,Color.WHITE);caption.setGravity(Gravity.CENTER);tile.addView(caption,new LinearLayout.LayoutParams(-1,dp(28)));tile.setContentDescription(label+" settings");tile.setOnClickListener(v->action.run());return tile;}
+    void appearancePicker(){new AlertDialog.Builder(this).setTitle("Appearance").setItems(new String[]{"Glass","Transparent","Solid · high contrast","Wallpapers"},(d,index)->{if(index==3){wallpaperPicker();return;}prefs.edit().putInt("glass_style",index).apply();render();}).setNegativeButton("Cancel",null).show();}
+    View panelAction(String label,Runnable action){TextView v=text(label,11,Color.WHITE);v.setGravity(Gravity.CENTER);v.setContentDescription("Panel "+label);v.setForeground(new android.graphics.drawable.InsetDrawable(new NeonGlassRim(this,16),0,dp(6),0,dp(6)));v.setFocusable(true);v.setBackground(new android.graphics.drawable.InsetDrawable(glass(0x55e1eaff,16),0,dp(6),0,dp(6)));v.setOnClickListener(w->action.run());LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(dp(52),dp(48));lp.leftMargin=dp(4);v.setLayoutParams(lp);return v;}
+    void panelMode(){new AlertDialog.Builder(this).setTitle("Panel mode").setItems(new String[]{"YouTube web","Radio FM · antenna","Kereta · Saga"},(d,i)->{prefs.edit().putInt("panel_mode",i).apply();rebuildPanel();}).show();}
+    void panelLayout(){if(prefs.getInt("panel_mode",0)!=0){Toast.makeText(this,"FM dan kereta mengikut saiz panel; Layout untuk laman YouTube",Toast.LENGTH_SHORT).show();return;}if(webPanel!=null&&webPanel.isFullscreen()){Toast.makeText(this,"Keluar paparan video untuk ubah layout laman",Toast.LENGTH_SHORT).show();return;}new AlertDialog.Builder(this).setTitle("Layout laman · bukan kualiti video").setSingleChoiceItems(ResolutionStage.NAMES,ResolutionStage.preset(prefs),(d,i)->{prefs.edit().putInt(ResolutionStage.PREF,i).apply();d.dismiss();rebuildPanel();}).setNegativeButton("Batal",null).show();}
+    void disposePanel(){if(webPanel!=null){webPanel.close();webPanel=null;}if(fmPanel!=null){fmPanel.close();fmPanel=null;}if(carPanel!=null){carPanel.pause();carPanel=null;}panelBox=null;}
+    void rebuildPanel(){
+        if(panelBox==null){render();return;}
+        LinearLayout mounted=panelBox;disposePanel();panelBox=mounted;mounted.removeAllViews();buildPanel();
+    }
+    void buildPanel(){
+        int res=ResolutionStage.preset(prefs);
+        if(prefs.getInt("panel_mode",0)==1){fmPanel=new FmPanelHost(this,getResources().getDisplayMetrics().density,()->new AlertDialog.Builder(this).setTitle("FM diagnostics").setMessage(DashFmController.report(this)).setPositiveButton("Close",null).show());panelBox.addView(fmPanel,new LinearLayout.LayoutParams(-1,0,1));if(resumed)fmPanel.resume();}
+        else if(prefs.getInt("panel_mode",0)==2){
+            carPanel=new SagaAngleView(this,worker,getSharedPreferences("vehicle",MODE_PRIVATE));
+            panelBox.addView(carPanel,new LinearLayout.LayoutParams(-1,0,1));
+            panelBox.addView(button("Gambar kereta", this::vehiclePhotoPicker),new LinearLayout.LayoutParams(-1,dp(48)));
+            if(resumed)carPanel.resume();
+        }
+        else {webPanel=new DashWebPlayer(this,ResolutionStage.SIZES[res][0],ResolutionStage.SIZES[res][1]);panelBox.addView(webPanel,new LinearLayout.LayoutParams(-1,0,1));if(resumed)webPanel.resume();}
+    }
+    void selectWallpaper(String path){ThemeEngine.saveManualWallpaper(prefs,path);ensureWallpaper();}
+    void applyTheme(ThemeEngine.Theme selected) {
+        ThemeEngine.apply(prefs, selected);
+        appearanceTheme = selected;
+        render();
+    }
+    void wallpaperPicker() {
+        if(wallpaperDialog!=null)wallpaperDialog.dismiss();
+        try {
+            String[] files=Wallpapers.ids();
+            LinearLayout content=column();content.setPadding(dp(16),dp(8),dp(16),dp(8));
+            LinearLayout actions=row();actions.addView(button("Choose from Files",this::chooseWallpaperFile),new LinearLayout.LayoutParams(0,dp(48),1));actions.addView(button("iDash gradient",()->selectWallpaper("")),new LinearLayout.LayoutParams(0,dp(48),1));content.addView(actions);
+            if (!ThemeEngine.isThemeWallpaper(ThemeEngine.wallpaper(prefs, appearanceTheme))) {
+                content.addView(button("Use theme wallpaper", () -> {
+                    ThemeEngine.useThemeWallpaper(prefs);
+                    ensureWallpaper();
+                }));
+            }
+            if(CustomWallpaper.file(this).isFile())content.addView(button("Use my saved image",()->selectWallpaper(CustomWallpaper.PATH)));
+            ScrollView scroll=new ScrollView(this);LinearLayout tiles=column();scroll.addView(tiles);content.addView(scroll,new LinearLayout.LayoutParams(-1,dp(300)));
+            AlertDialog dialog=new AlertDialog.Builder(this).setTitle("Wallpapers").setView(content).setNegativeButton("Close",null).create();
+            java.util.concurrent.atomic.AtomicBoolean open=new java.util.concurrent.atomic.AtomicBoolean(true);
+            java.util.ArrayList<ImageView> previews=new java.util.ArrayList<>();
+            for(int index=0;index<files.length;index+=4){LinearLayout line=row();tiles.addView(line);for(int offset=0;offset<4&&index+offset<files.length;offset++){
+                String name=files[index+offset],path=name;LinearLayout tile=column();tile.setPadding(dp(4),dp(4),dp(4),dp(4));
+                ImageView preview=new ImageView(this);preview.setScaleType(ImageView.ScaleType.CENTER_CROP);preview.setBackground(glass(0xff25324d,12));tile.addView(preview,new LinearLayout.LayoutParams(-1,dp(90)));previews.add(preview);
+                TextView caption=text(Wallpapers.name(name),12,Color.WHITE);caption.setGravity(Gravity.CENTER);tile.addView(caption,new LinearLayout.LayoutParams(-1,dp(28)));tile.setContentDescription("Wallpaper "+Wallpapers.name(name));tile.setOnClickListener(v->{selectWallpaper(path);dialog.dismiss();});line.addView(tile,new LinearLayout.LayoutParams(0,-2,1));
+            }}
+            wallpaperDialog=dialog;dialog.setOnDismissListener(d->{open.set(false);tiles.removeAllViews();if(wallpaperDialog==dialog)wallpaperDialog=null;});dialog.show();if(dialog.getWindow()!=null){dialog.getWindow().setBackgroundDrawable(IosStyle.glass(this,0xff25324d,28,true));dialog.getWindow().setLayout(Math.min(dp(720),getResources().getDisplayMetrics().widthPixels-dp(32)),-2);}
+            worker.execute(()->{for(int i=0;i<files.length&&open.get()&&!destroyed;i++){final int slot=i;try{final Bitmap image=Wallpapers.decode(getAssets(),files[i],192);main.post(()->{if(open.get()&&!destroyed)previews.get(slot).setImageBitmap(image);});}catch(java.io.IOException ignored){}}});
+        }catch(RuntimeException unavailable){Toast.makeText(this,"Wallpaper gallery unavailable",Toast.LENGTH_SHORT).show();}
+    }
+    static final int WALLPAPER_REQUEST=41, DRIVE_WALLPAPER_REQUEST=42, VEHICLE_PHOTO_REQUEST=43;
+    private static final String DRIVE_WALLPAPER = "drive_wallpaper_custom";
+    private int driveWallpaperGeneration;
+
+    java.io.File driveWallpaperFile() {
+        return new java.io.File(getFilesDir(), "drive-wallpaper-image");
+    }
+
+    void driveWallpaperPicker() {
+        if (wallpaperDialog != null) wallpaperDialog.dismiss();
+        wallpaperDialog = new AlertDialog.Builder(this).setTitle("Wallpaper Drive")
+                .setItems(new String[]{"Pilih gambar daripada Files", "Pulihkan wallpaper asal"}, (dialog, option) -> {
+                    if (option == 0) {
+                        chooseWallpaperFile(DRIVE_WALLPAPER_REQUEST);
+                    } else {
+                        driveWallpaperGeneration++;
+                        prefs.edit().remove(DRIVE_WALLPAPER).apply();
+                        if ("drive".equals(page)) UltraGlassSkin.setDriveScene(this, shell, null);
+                        Toast.makeText(this, "Wallpaper Drive asal dipulihkan", Toast.LENGTH_SHORT).show();
+                    }
+                }).setNegativeButton("Tutup", null).show();
+        wallpaperDialog.setOnDismissListener(dialog -> {
+            if (wallpaperDialog == dialog) wallpaperDialog = null;
+        });
+    }
+
+    void loadDriveWallpaper(View target) {
+        if (!prefs.getBoolean(DRIVE_WALLPAPER, false)) return;
+        int generation = driveWallpaperGeneration;
+        worker.execute(() -> {
+            try {
+                Bitmap image = CustomWallpaper.decode(driveWallpaperFile(), 1280);
+                main.post(() -> {
+                    if (destroyed || generation != driveWallpaperGeneration || shell != target ||
+                            !"drive".equals(page)) {
+                        image.recycle();
+                        return;
+                    }
+                    UltraGlassSkin.setDriveScene(this, target, image);
+                });
+            } catch (java.io.IOException | RuntimeException unavailable) {
+                // The built-in Drive scene is already displayed.
+            }
+        });
+    }
+
+    void chooseWallpaperFile() { chooseWallpaperFile(WALLPAPER_REQUEST); }
+
+    private void chooseWallpaperFile(int request) {
+        if(wallpaperDialog!=null)wallpaperDialog.dismiss();
+        try{startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/*").addCategory(Intent.CATEGORY_OPENABLE),request);}
+        catch(RuntimeException unavailable){Toast.makeText(this,"No image picker installed",Toast.LENGTH_SHORT).show();}
+    }
+
+    private int vehiclePhotoGeneration;
+
+    private void vehiclePhotoPicker() {
+        boolean saved = SagaAngleView.photoFile(this).isFile();
+        String[] options = saved ? new String[]{"Pilih gambar daripada Files", "Guna gambar tersimpan", "Guna ilustrasi iDash3"}
+                : new String[]{"Pilih gambar daripada Files"};
+        new AlertDialog.Builder(this).setTitle("Gambar kereta pada peranti")
+                .setItems(options, (dialog, index) -> {
+                    if (index == 0) chooseWallpaperFile(VEHICLE_PHOTO_REQUEST);
+                    else {
+                        vehiclePhotoGeneration++;
+                        useVehiclePhoto(index == 1);
+                    }
+                }).setNegativeButton("Tutup", null).show();
+    }
+
+    private void useVehiclePhoto(boolean enabled) {
+        getSharedPreferences("vehicle", MODE_PRIVATE).edit().putBoolean(SagaAngleView.USE_PHOTO, enabled).apply();
+        if (carPanel != null) rebuildPanel();
+    }
+
+    private void importVehiclePhoto(android.net.Uri uri) {
+        int request = ++vehiclePhotoGeneration;
+        worker.execute(() -> {
+            boolean saved = false;
+            try (java.io.InputStream input = getContentResolver().openInputStream(uri)) {
+                if (input == null) throw new java.io.IOException();
+                CustomWallpaper.save(SagaAngleView.photoFile(this), input);
+                saved = true;
+            } catch (java.io.IOException | RuntimeException | OutOfMemoryError unavailable) {
+                // Keep the previous image and selection if import fails.
+            }
+            boolean success = saved;
+            main.post(() -> {
+                if (destroyed || request != vehiclePhotoGeneration) return;
+                if (success) useVehiclePhoto(true);
+                Toast.makeText(this, success ? "Gambar kereta disimpan pada peranti"
+                        : "Gambar tidak dapat dibuka. Pilih JPG, PNG atau WebP hingga 16 MiB.", Toast.LENGTH_SHORT).show();
+            });
+        });
+    }
+
+    @Override protected void onActivityResult(int request,int result,Intent data){
+        super.onActivityResult(request,result,data);
+        if (request == VEHICLE_PHOTO_REQUEST) {
+            if (result == RESULT_OK && data != null && data.getData() != null) importVehiclePhoto(data.getData());
+            return;
+        }
+        boolean drive = request == DRIVE_WALLPAPER_REQUEST;
+        if ((!drive && request != WALLPAPER_REQUEST) || result != RESULT_OK ||
+                data == null || data.getData() == null) return;
+        android.net.Uri uri = data.getData();
+        int generation = drive ? ++driveWallpaperGeneration : 0;
+        java.io.File destination = drive ? driveWallpaperFile() : CustomWallpaper.file(this);
+        Toast.makeText(this,"Loading wallpaper…",Toast.LENGTH_SHORT).show();
+        worker.execute(() -> {
+            try (java.io.InputStream input = getContentResolver().openInputStream(uri)) {
+                if (input == null) throw new java.io.IOException();
+                CustomWallpaper.save(destination, input);
+            } catch (java.io.IOException | RuntimeException | OutOfMemoryError unavailable) {
+                main.post(() -> {
+                    if (!destroyed && (!drive || generation == driveWallpaperGeneration)) {
+                        Toast.makeText(this, "Image unavailable. Choose a JPG, PNG or WebP up to 16 MiB.",
+                                Toast.LENGTH_LONG).show();
+                    }
+                });
+                return;
+            }
+            main.post(() -> {
+                if (destroyed) return;
+                if (drive) {
+                    if (generation != driveWallpaperGeneration) return;
+                    prefs.edit().putBoolean(DRIVE_WALLPAPER, true).apply();
+                    if ("drive".equals(page)) loadDriveWallpaper(shell);
+                    Toast.makeText(this, "Wallpaper Drive disimpan", Toast.LENGTH_SHORT).show();
+                } else {
+                    requestedWallpaper = null;
+                    selectWallpaper(CustomWallpaper.PATH);
+                }
+            });
+        });
+    }
+    void updateBackdrop(){if(wallpaperView!=null){wallpaperView.setImageBitmap(wallpaperBitmap);wallpaperView.setVisibility(wallpaperBitmap==null?View.GONE:View.VISIBLE);}if(wallpaperShade!=null)wallpaperShade.setVisibility(wallpaperBitmap==null||ThemeEngine.isThemeWallpaper(requestedWallpaper)?View.GONE:View.VISIBLE);}
+    Bitmap decodeWallpaper(String path, int maxEdge) throws java.io.IOException {
+        return CustomWallpaper.PATH.equals(path)
+                ? CustomWallpaper.decode(CustomWallpaper.file(this), maxEdge)
+                : Wallpapers.decode(getAssets(), path, maxEdge);
+    }
+    void ensureWallpaper() {
+        String path=ThemeEngine.wallpaper(prefs,appearanceTheme);
+        boolean themed=ThemeEngine.isThemeWallpaper(path);
+        if(wallpaperBase!=null)wallpaperBase.setVisibility(themed?View.GONE:View.VISIBLE);
+        if(path.equals(requestedWallpaper))return;
+        boolean changingThemeWallpaper=themed||ThemeEngine.isThemeWallpaper(requestedWallpaper);
+        requestedWallpaper=path;int generation=++wallpaperGeneration;
+        wallpaperLabels.forEach(this::updateWallpaperLabel);
+        if(path.isEmpty()){wallpaperBitmap=null;IosStyle.publishGlass(this,new GlassBackdrop.Frame(null,0xff526783));updateBackdrop();return;}
+        if(changingThemeWallpaper){wallpaperBitmap=null;IosStyle.publishGlass(this,new GlassBackdrop.Frame(null,themed?appearanceTheme.panelTint:0xff526783));updateBackdrop();}
+        if(worker.isShutdown())return;
+        final int glassQuality=IosStyle.quality(this);
+        worker.execute(()->{Bitmap image;try{image=decodeWallpaper(path,1280);}catch(java.io.IOException|RuntimeException|OutOfMemoryError unavailable){main.post(()->{if(!destroyed&&generation==wallpaperGeneration){requestedWallpaper=null;Toast.makeText(this,changingThemeWallpaper?"Theme wallpaper unavailable.":"Wallpaper unavailable. Previous image kept.",Toast.LENGTH_LONG).show();}});return;}final Bitmap decoded=image;GlassBackdrop.Frame prepared;try{prepared=GlassBackdrop.prepare(decoded,glassQuality);}catch(OutOfMemoryError unavailable){prepared=new GlassBackdrop.Frame(null,0xff526783);}final GlassBackdrop.Frame glassFrame=prepared;
+            main.post(()->{if(destroyed||generation!=wallpaperGeneration)return;wallpaperBitmap=decoded;IosStyle.publishGlass(this,glassFrame);updateBackdrop();});});
+    }
+    @Override public void onRequestPermissionsResult(int request,String[] permissions,int[] results){super.onRequestPermissionsResult(request,permissions,results);if(request==DriveDashboard.LOCATION_REQUEST&&driveDashboard!=null)driveDashboard.permissionResult();if(request==DashboardWeather.LOCATION_REQUEST&&driveDashboard!=null)driveDashboard.weather.permissionResult();}
+    void showCalendar() {Calendar c=Calendar.getInstance();DatePickerDialog dialog=new DatePickerDialog(this,(v,y,m,d)->{},c.get(Calendar.YEAR),c.get(Calendar.MONTH),c.get(Calendar.DAY_OF_MONTH));dialog.setTitle("Calendar");dialog.show();}
+    private static void label(TextView view,String value){if(view!=null&&!TextUtils.equals(view.getText(),value))view.setText(value);}
+    void updateClock(){updateClock(System.currentTimeMillis());}
+    // The argument makes day/time-zone boundaries testable without changing the device clock.
+    void updateClock(long now){
+        if(prayerJourney!=null)prayerJourney.tick(now);if(driveDashboard!=null)driveDashboard.tick(now);
+        long minute=now/60000;if(minute!=jakimMinute)updateJakim(now);
+        boolean h24=prefs.getBoolean("24h",true);Locale locale=Locale.getDefault();TimeZone zone=TimeZone.getDefault();
+        boolean changed=clockFormat==null||clock24!=h24||!locale.equals(clockLocale)||!zone.getID().equals(clockZone.getID())||!zone.hasSameRules(clockZone);
+        if(!changed&&clockMinute==minute)return;
+        if(changed){clockLocale=locale;clockZone=zone;clock24=h24;clockFormat=new SimpleDateFormat(h24?"HH:mm":"h:mm a",locale);dayFormat=new SimpleDateFormat("EEEE, d MMMM",locale);statusFormat=new SimpleDateFormat(h24?"HH:mm  ·  EEE, d MMM":"h:mm a  ·  EEE, d MMM",locale);clockFormat.setTimeZone(zone);dayFormat.setTimeZone(zone);statusFormat.setTimeZone(zone);}
+        clockMoment.setTime(now);String day=dayFormat.format(clockMoment);label(clock,clockFormat.format(clockMoment));label(date,day);label(calendarDay,day);label(statusTime,statusFormat.format(clockMoment));clockMinute=minute;
+    }
+    void loadJakim(boolean refresh) {
+        String zone=prefs.getString("jakim_zone","");if(zone.isEmpty()||jakimLoading||(!refresh&&zone.equals(loadedZone)))return;jakimLoading=true;
+        networkWorker.execute(()->{String error="";Map<String,JakimCalendar.Day> days=Collections.emptyMap();try{if(refresh)JakimCalendar.refresh(this,zone);days=JakimCalendar.load(this,zone);}catch(Exception failed){error="Muat turun gagal; cache sedia ada dikekalkan";try{days=JakimCalendar.load(this,zone);}catch(Exception ignored){}}
+            final Map<String,JakimCalendar.Day> result=days;final String message=error;
+            main.post(()->{if(destroyed)return;jakimLoading=false;if(!zone.equals(prefs.getString("jakim_zone",""))){loadJakim(false);return;}loadedZone=zone;jakimDays=result;updateJakim();if(!message.isEmpty())Toast.makeText(this,message,Toast.LENGTH_LONG).show();});});
+    }
+    void updateJakim(){updateJakim(System.currentTimeMillis());}
+    void updateJakim(long now){
+        jakimDayKey=JakimCalendar.key(now);jakimMinute=now/60000;if(jakimText==null)return;String zone=prefs.getString("jakim_zone",""),heading="Waktu solat",body;
+        if(zone.isEmpty())body="Pilih zon JAKIM · tekan di sini";
+        else{JakimCalendar.Day d=zone.equals(loadedZone)?jakimDays.get(jakimDayKey):null;
+            if(d==null)body="JAKIM · "+zone+"\n"+jakimDayKey+" · MYT\n"+(jakimLoading?"Memuat jadual…":"Tiada jadual tarikh ini · tekan untuk kemas kini");
+            else{heading=JakimCalendar.nextPrayer(jakimDays,now);body="JAKIM · "+zone+" · "+d.hijri+" H\nSubuh "+d.times[0]+" · Syuruk "+d.times[1]+" · Zohor "+d.times[2]+"\nAsar "+d.times[3]+" · Maghrib "+d.times[4]+" · Isyak "+d.times[5];}
+        }label(jakimNext,heading);if(jakimText!=null&&!TextUtils.equals(jakimText.getText().toString(),body)){int nl=body.indexOf('\n');android.text.SpannableString styled=new android.text.SpannableString(body);if(nl>0){styled.setSpan(new android.text.style.RelativeSizeSpan(.88f),nl+1,body.length(),android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);styled.setSpan(new android.text.style.ForegroundColorSpan(0xc8ffffff),nl+1,body.length(),android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);}jakimText.setText(styled);}
+    }
+    AlertDialog jakimDialog() {
+        String zone = prefs.getString("jakim_zone", "");
+        boolean hasZone = !zone.isEmpty();
+        String[] actions = hasZone
+            ? new String[]{"Pilih tarikh / lihat jadual penuh", "Tukar zon", "Kemas kini daripada JAKIM"}
+            : new String[]{"Pilih zon JAKIM"};
+
+        Switch motion = new Switch(this);
+        motion.setId(android.R.id.checkbox);
+        motion.setText("Animasi kad JAKIM");
+        motion.setMinHeight(dp(48));
+        motion.setPadding(dp(24), 0, dp(24), 0);
+        motion.setChecked(GlassAppearance.bool(prefs, PrayerJourneyView.MOTION_PREF, true));
+        motion.setOnCheckedChangeListener((view, checked) -> {
+            prefs.edit().putBoolean(PrayerJourneyView.MOTION_PREF, checked).apply();
+            updateClock();
+        });
+
+        return new AlertDialog.Builder(this)
+            .setTitle(hasZone ? "Kalendar JAKIM · " + zone : "Kalendar JAKIM")
+            .setItems(actions, (dialog, action) -> {
+                if (!hasZone || action == 1) {
+                    chooseJakimZone();
+                } else if (action == 2) {
+                    loadJakim(true);
+                    Toast.makeText(this, "Mengemas kini jadual…", Toast.LENGTH_SHORT).show();
+                } else {
+                    showJakimDatePicker(zone);
+                }
+            })
+            .setView(motion)
+            .setNegativeButton("Tutup", null)
+            .show();
+    }
+
+    private void showJakimDatePicker(String zone) {
+        Calendar today = Calendar.getInstance(JakimCalendar.MY);
+        new DatePickerDialog(this, (picker, year, month, day) -> {
+            Calendar chosen = Calendar.getInstance(JakimCalendar.MY);
+            chosen.clear();
+            chosen.set(year, month, day, 12, 0);
+            String key = JakimCalendar.key(chosen.getTimeInMillis());
+            JakimCalendar.Day info = jakimDays.get(key);
+            StringBuilder message = new StringBuilder();
+            if (info == null) {
+                message.append("Tiada jadual rasmi untuk tarikh ini. Kemas kini jadual JAKIM diperlukan.");
+            } else {
+                message.append("Hijri: ").append(info.hijri).append(" H\n\n");
+                for (int i = 0; i < JakimCalendar.NAMES.length; i++) {
+                    message.append(JakimCalendar.NAMES[i]).append("  ").append(info.times[i]).append('\n');
+                }
+            }
+            new AlertDialog.Builder(this).setTitle(zone + " · " + key)
+                .setMessage(message + "\nSumber: e-Solat JAKIM · MYT")
+                .setPositiveButton("Tutup", null).show();
+        }, today.get(Calendar.YEAR), today.get(Calendar.MONTH), today.get(Calendar.DAY_OF_MONTH)).show();
+    }
+    void chooseJakimZone() {
+        String[] labels=Arrays.copyOf(JakimCalendar.LABELS,5);labels[4]="Zon lain (muat turun diperlukan)";
+        new AlertDialog.Builder(this).setTitle("Pilih zon JAKIM").setItems(labels,(d,index)->{if(index<4)setJakimZone(JakimCalendar.ZONES[index]);else{EditText input=new EditText(this);input.setSingleLine();input.setHint("Contoh: JHR01");new AlertDialog.Builder(this).setTitle("Kod zon JAKIM").setView(input).setPositiveButton("Pilih",(dialog,w)->{String z=input.getText().toString().trim().toUpperCase(Locale.ROOT);if(JakimCalendar.validZone(z))setJakimZone(z);else Toast.makeText(this,"Kod zon tidak sah",Toast.LENGTH_LONG).show();}).setNegativeButton("Batal",null).show();}}).setNegativeButton("Batal",null).show();
+    }
+    void setJakimZone(String zone){prefs.edit().putString("jakim_zone",zone).apply();loadedZone="";jakimDays=Collections.emptyMap();updateJakim();loadJakim(false);if("settings".equals(page)&&"Prayer Times".equals(settingsSection))render();}
+    /** Original vector marks; no assets from the reference APK. */
+    final class FavoriteGlyph extends View {
+        final Paint ink=new Paint(Paint.ANTI_ALIAS_FLAG);final Path path=new Path(); final int slot;
+        FavoriteGlyph(Context context,int slot){super(context);this.slot=slot;}
+        protected void onDraw(Canvas canvas){
+            canvas.save();canvas.scale(getWidth()/64f,getHeight()/64f);ink.setColor(Color.WHITE);ink.setStyle(Paint.Style.FILL);path.reset();
+            if(slot==0){ink.setStyle(Paint.Style.STROKE);ink.setStrokeWidth(3.6f);ink.setStrokeCap(Paint.Cap.ROUND);ink.setStrokeJoin(Paint.Join.ROUND);path.moveTo(22,23);path.lineTo(42,41);path.lineTo(31,50);path.lineTo(31,14);path.lineTo(42,23);path.lineTo(22,41);canvas.drawPath(path,ink);}
+            else if(slot==1){ink.setColor(0xffc9eaff);canvas.drawRoundRect(13,18,32,30,3,3,ink);ink.setColor(Color.WHITE);canvas.drawRoundRect(11,24,53,48,4,4,ink);ink.setColor(0xffe6f4ff);canvas.drawRoundRect(13,27,51,46,2,2,ink);}
+            else {canvas.drawRoundRect(10,18,54,46,8,8,ink);ink.setColor(0xfff00832);path.moveTo(28,25);path.lineTo(28,39);path.lineTo(40,32);path.close();canvas.drawPath(path,ink);}
+            canvas.restore();
+        }
+    }
+    final class Wallpaper extends View {
+        final Paint p=new Paint(3); final Path ribbon=new Path(); Shader base, glow, wave;
+        Wallpaper(Context c){super(c);}
+        protected void onSizeChanged(int width,int height,int oldWidth,int oldHeight){
+            float w=width,h=height;if(w<=0||h<=0)return;
+            base=new LinearGradient(0,0,w,h,theme==1?new int[]{0xff442c59,0xff883e6a,0xff243954}:new int[]{0xff153855,0xff42447c,0xff6c427e},null,Shader.TileMode.CLAMP);
+            glow=new RadialGradient(w*.88f,h*.04f,w*.67f,new int[]{theme==1?0x99ffccac:0x9961cbd5,0x00213762},null,Shader.TileMode.CLAMP);
+            ribbon.reset();ribbon.moveTo(-w*.2f,h);ribbon.cubicTo(w*.1f,-h*.2f,w*.6f,h*1.3f,w*1.2f,h*.03f);ribbon.lineTo(w*1.2f,h*1.2f);ribbon.lineTo(-w*.2f,h*1.2f);ribbon.close();
+            wave=new LinearGradient(0,h*.2f,w,h,new int[]{0x169dccff,0x957c7cda,0x44ebb9e3},null,Shader.TileMode.CLAMP);
+        }
+        protected void onDraw(Canvas c){p.setShader(base);c.drawRect(0,0,getWidth(),getHeight(),p);if(glow!=null){p.setShader(glow);c.drawRect(0,0,getWidth(),getHeight(),p);}if(wave!=null){p.setShader(wave);c.drawPath(ribbon,p);}p.setShader(null);}
+    }
+}
